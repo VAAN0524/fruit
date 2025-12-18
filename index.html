@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🍎 水果忍者 - 简化手势识别</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            background: #000000;
+            touch-action: none;
+            user-select: none;
+        }
+
+        #videoElement {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 1;
+            transform: scaleX(-1);
+        }
+
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+
+        #startBtn {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 30px 60px;
+            font-size: 36px;
+            font-weight: bold;
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 15px 50px rgba(238, 90, 36, 0.6);
+            transition: all 0.3s ease;
+            z-index: 100;
+        }
+
+        #startBtn:hover {
+            transform: translate(-50%, -50%) scale(1.1);
+            box-shadow: 0 20px 60px rgba(238, 90, 36, 0.8);
+        }
+
+        #score {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 60px;
+            font-weight: bold;
+            text-shadow: 4px 4px 8px rgba(0, 0, 0, 0.9);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px 40px;
+            border-radius: 20px;
+            z-index: 20;
+            display: none;
+        }
+
+        #status {
+            position: absolute;
+            top: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px 30px;
+            border-radius: 15px;
+            z-index: 20;
+            display: none;
+        }
+
+        #debugInfo {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: white;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            z-index: 30;
+            display: none;
+        }
+
+        #playerInfo {
+            position: absolute;
+            top: 200px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 10px;
+            z-index: 20;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <video id="videoElement" autoplay playsinline></video>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="startBtn">🎮 开始手势识别游戏</div>
+    <div id="score">得分: 0</div>
+    <div id="status">正在初始化...</div>
+    <div id="playerInfo">等待玩家加入...</div>
+
+    <div id="debugInfo">
+        <div>模型状态: 加载中...</div>
+        <div>手势检测: 等待中...</div>
+        <div>识别点数: 0/168</div>
+        <div>支持人数: 最多4人</div>
+    </div>
+
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+
+    <script>
+        // 全局变量
+        let game = null;
+        let hands = null;
+        let camera = null;
+        let lastHandPosition = null;
+
+        // DOM元素
+        const video = document.getElementById('videoElement');
+        const gameCanvas = document.getElementById('gameCanvas');
+        const gameCtx = gameCanvas.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        const scoreElement = document.getElementById('score');
+        const statusElement = document.getElementById('status');
+        const playerInfo = document.getElementById('playerInfo');
+        const debugInfo = document.getElementById('debugInfo');
+
+        // 更新调试信息
+        function updateDebugInfo(modelStatus, detectionStatus, pointCount) {
+            const infoElements = debugInfo.querySelectorAll('div');
+            if (infoElements[0]) infoElements[0].textContent = `模型状态: ${modelStatus}`;
+            if (infoElements[1]) infoElements[1].textContent = `手势检测: ${detectionStatus}`;
+            if (infoElements[2]) infoElements[2].textContent = `识别点数: ${pointCount}/42`;
+        }
+
+        // 水果类 - 全屏抛物线运动
+        class Fruit {
+            constructor() {
+                this.radius = Math.random() * 25 + 52; // 增加30%：40*1.3=52
+                this.type = ['🍎', '🍊', '🍉', '🍇', '🍌', '🍓', '🍑'][Math.floor(Math.random() * 7)];
+
+                // 使用更柔和的颜色，减少背景干扰
+                const fruitColors = [
+                    { bg: '#ff6b6b', name: '苹果' },
+                    { bg: '#ffa726', name: '橙子' },
+                    { bg: '#66bb6a', name: '西瓜' },
+                    { bg: '#ab47bc', name: '葡萄' },
+                    { bg: '#ffee58', name: '香蕉' },
+                    { bg: '#ef5350', name: '草莓' },
+                    { bg: '#ec407a', name: '桃子' }
+                ];
+                const selectedColor = fruitColors[Math.floor(Math.random() * fruitColors.length)];
+                this.color = selectedColor.bg;
+                this.fruitName = selectedColor.name;
+
+                // 全屏抛物线运动参数 - 更随机的出现位置
+                const spawnPatterns = [
+                    'left', 'right', 'bottom-left', 'bottom-right', 'bottom-center'
+                ];
+                const pattern = spawnPatterns[Math.floor(Math.random() * spawnPatterns.length)];
+
+                switch (pattern) {
+                    case 'left':
+                        this.x = -100;
+                        this.y = gameCanvas.height * (0.5 + Math.random() * 0.5);
+                        break;
+                    case 'right':
+                        this.x = gameCanvas.width + 100;
+                        this.y = gameCanvas.height * (0.5 + Math.random() * 0.5);
+                        break;
+                    case 'bottom-left':
+                        this.x = gameCanvas.width * (0 + Math.random() * 0.2);
+                        this.y = gameCanvas.height + 50;
+                        break;
+                    case 'bottom-right':
+                        this.x = gameCanvas.width * (0.8 + Math.random() * 0.2);
+                        this.y = gameCanvas.height + 50;
+                        break;
+                    case 'bottom-center':
+                        this.x = gameCanvas.width * (0.4 + Math.random() * 0.2);
+                        this.y = gameCanvas.height + 50;
+                        break;
+                }
+
+                // 目标位置更随机 - 可以从任意位置飞到任意位置
+                const targetPatterns = [
+                    'top-left', 'top-right', 'top-center', 'center', 'random'
+                ];
+                const targetPattern = targetPatterns[Math.floor(Math.random() * targetPatterns.length)];
+
+                switch (targetPattern) {
+                    case 'top-left':
+                        this.targetX = gameCanvas.width * (0.1 + Math.random() * 0.2);
+                        break;
+                    case 'top-right':
+                        this.targetX = gameCanvas.width * (0.7 + Math.random() * 0.2);
+                        break;
+                    case 'top-center':
+                        this.targetX = gameCanvas.width * (0.4 + Math.random() * 0.2);
+                        break;
+                    case 'center':
+                        this.targetX = gameCanvas.width * (0.2 + Math.random() * 0.6);
+                        break;
+                    case 'random':
+                    default:
+                        this.targetX = gameCanvas.width * (0.1 + Math.random() * 0.8);
+                        break;
+                }
+
+                this.targetY = -this.radius - 20; // 确保水果顶部到达屏幕顶部
+
+                // 使用物理公式计算初始速度，确保能达到目标高度
+                const gravity = 0.24; // 慢20%: 0.3 * 0.8 = 0.24
+                const verticalDistance = Math.abs(this.targetY - this.y);
+
+                // h = v₀t - 0.5gt², 最大高度时 v = v₀ - gt = 0 => t = v₀/g
+                // h = v₀²/(2g) => v₀ = √(2gh)
+                const requiredVerticalVelocity = Math.sqrt(2 * gravity * verticalDistance);
+
+                this.vx = (this.targetX - this.x) / (requiredVerticalVelocity / gravity); // 水平速度
+                this.vy = -requiredVerticalVelocity; // 垂直速度（向上，负值）
+                this.gravity = gravity;
+
+                this.rotation = 0;
+                this.rotationSpeed = (Math.random() - 0.5) * 0.12;
+                this.sliced = false;
+                this.opacity = 1;
+                this.sliceVelocity = { x: 0, y: 0 };
+            }
+
+            update() {
+                if (!this.sliced) {
+                    // 抛物线运动
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vy += this.gravity;
+                    this.rotation += this.rotationSpeed;
+                } else {
+                    // 切割后的散开效果
+                    this.x += this.sliceVelocity.x;
+                    this.y += this.sliceVelocity.y;
+                    this.sliceVelocity.y += this.gravity * 1.5;
+                    this.opacity -= 0.03;
+                    this.rotation += this.rotationSpeed * 2;
+                }
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = this.opacity;
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+
+                if (!this.sliced) {
+                    // 淡雅背景，突出emoji
+                    ctx.shadowColor = this.color;
+                    ctx.shadowBlur = 15;
+
+                    // 主体 - 淡色背景
+                    ctx.fillStyle = this.color + '30'; // 添加透明度，淡化背景
+                    ctx.beginPath();
+                    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // 轻微边框
+                    ctx.strokeStyle = this.color + '60';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+
+                    // 突出显示emoji表情
+                    ctx.font = `bold ${this.radius * 1.6}px Apple Color Emoji, Segoe UI Emoji, Arial`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillStyle = '#FFFFFF'; // 白色emoji更突出
+                    ctx.shadowColor = '#000000';
+                    ctx.shadowBlur = 3;
+                    ctx.fillText(this.type, 0, 0);
+                } else {
+                    // 切割效果
+                    for (let i = 0; i < 16; i++) {
+                        const angle = (Math.PI * 2 * i) / 16;
+                        const px = Math.cos(angle) * this.radius / 3;
+                        const py = Math.sin(angle) * this.radius / 3;
+                        ctx.fillStyle = this.color;
+                        ctx.beginPath();
+                        ctx.arc(px, py, this.radius / 5, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+
+                ctx.restore();
+            }
+
+            isOffScreen() {
+                return this.y > gameCanvas.height + 100 || this.opacity <= 0 ||
+                       this.x < -100 || this.x > gameCanvas.width + 100;
+            }
+
+            checkHandCollision(landmarks) {
+                if (this.sliced || !landmarks) return false;
+
+                // 检查所有21个点是否碰到水果
+                for (let landmark of landmarks) {
+                    const handX = (1 - landmark.x) * gameCanvas.width; // 镜像坐标
+                    const handY = landmark.y * gameCanvas.height;
+
+                    const distance = Math.sqrt(Math.pow(handX - this.x, 2) + Math.pow(handY - this.y, 2));
+                    if (distance < this.radius + 20) { // 20点检测半径
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            slice() {
+                if (!this.sliced) {
+                    this.sliced = true;
+                    // 切割后的散开速度
+                    this.sliceVelocity.x = (Math.random() - 0.5) * 20;
+                    this.sliceVelocity.y = -Math.random() * 15 - 5;
+                }
+            }
+        }
+
+        // 粒子类
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 25;
+                this.vy = (Math.random() - 0.5) * 25 - 10;
+                this.radius = Math.random() * 6 + 4;
+                this.color = color;
+                this.life = 1;
+                this.decay = 0.02;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.4;
+                this.life -= this.decay;
+                this.vx *= 0.98;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = this.life;
+                ctx.fillStyle = this.color;
+                ctx.shadowColor = this.color;
+                ctx.shadowBlur = 15;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // 游戏主类
+        class FruitNinjaGame {
+            constructor() {
+                this.fruits = [];
+                this.particles = [];
+                this.score = 0;
+                this.gameRunning = false;
+                this.lastSpawnTime = 0;
+                this.spawnInterval = 1200; // 1.2秒生成一个水果，增加频率
+                this.maxFruits = 5; // 最大5个水果
+
+                this.setupCanvas();
+            }
+
+            setupCanvas() {
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+            }
+
+            resize() {
+                gameCanvas.width = window.innerWidth;
+                gameCanvas.height = window.innerHeight;
+            }
+
+            start() {
+                this.gameRunning = true;
+                this.score = 0;
+                this.fruits = [];
+                this.particles = [];
+                this.updateScore();
+
+                // 初始生成3-5个水果
+                const initialFruits = 3 + Math.floor(Math.random() * 3); // 3-5个
+                for (let i = 0; i < initialFruits; i++) {
+                    setTimeout(() => this.spawnFruit(), i * 300);
+                }
+            }
+
+            update() {
+                // 更新水果
+                this.fruits = this.fruits.filter(fruit => {
+                    fruit.update();
+                    return !fruit.isOffScreen();
+                });
+
+                // 更新粒子
+                this.particles = this.particles.filter(particle => {
+                    particle.update();
+                    return particle.life > 0;
+                });
+
+                // 生成新水果 - 保持3-5个水果在屏幕上
+                const currentTime = Date.now();
+                const minFruits = 3; // 最少3个水果
+
+                if (this.fruits.length < minFruits ||
+                    (currentTime - this.lastSpawnTime > this.spawnInterval && this.fruits.length < this.maxFruits)) {
+                    this.spawnFruit();
+                    this.lastSpawnTime = currentTime;
+                }
+            }
+
+            draw() {
+                gameCtx.clearRect(0, 0, gameCanvas.width, gameCanvas.height);
+
+                // 绘制水果
+                this.fruits.forEach(fruit => fruit.draw(gameCtx));
+
+                // 绘制粒子
+                this.particles.forEach(particle => particle.draw(gameCtx));
+            }
+
+            spawnFruit() {
+                this.fruits.push(new Fruit());
+            }
+
+            checkHandCollisions(results) {
+                if (!results || !results.multiHandLandmarks) return;
+
+                // 处理所有检测到的手（最多4人 = 8只手 = 168点）
+                for (let handIndex = 0; handIndex < results.multiHandLandmarks.length && handIndex < 8; handIndex++) {
+                    const landmarks = results.multiHandLandmarks[handIndex];
+
+                    this.fruits.forEach(fruit => {
+                        if (fruit.checkHandCollision(landmarks)) {
+                            fruit.slice();
+                            // 多人游戏时得分更多
+                            const bonusPoints = results.multiHandLandmarks.length > 1 ? 15 : 10;
+                            this.score += bonusPoints;
+                            this.updateScore();
+                            this.createParticles(fruit.x, fruit.y, fruit.color);
+                            this.playSliceSound();
+                        }
+                    });
+
+                    // 绘制手势，传递手索引用于颜色区分
+                    this.drawHand(landmarks, handIndex);
+                }
+
+                // 更新调试信息
+                const totalPoints = results.multiHandLandmarks.length * 21;
+                const maxPoints = Math.min(results.multiHandLandmarks.length * 21, 168); // 最多4人=8手=168点
+                updateDebugInfo('已加载', '检测中', `${totalPoints}/${maxPoints}`);
+
+                // 显示多人游戏信息
+                const handCount = results.multiHandLandmarks.length;
+                const playerCount = Math.ceil(handCount / 2); // 假设每人2只手
+
+                if (handCount > 0) {
+                    playerInfo.style.display = 'block';
+
+                    if (playerCount === 1) {
+                        playerInfo.textContent = '👤 单人游戏模式';
+                        statusElement.textContent = '🎮 挥手切水果！';
+                    } else {
+                        playerInfo.textContent = `👥 ${playerCount}人游戏 - ${handCount}只手检测中`;
+                        statusElement.textContent = `🎮 ${playerCount}人游戏！多人同时切水果！`;
+                    }
+                } else {
+                    playerInfo.style.display = 'none';
+                }
+            }
+
+            drawHand(landmarks, handIndex = 0) {
+                // 为不同手分配颜色
+                const handColors = [
+                    { line: 'rgba(0, 255, 0, 0.3)', point: 'rgba(255, 0, 0, 0.4)', border: 'rgba(255, 255, 255, 0.2)' },
+                    { line: 'rgba(0, 150, 255, 0.3)', point: 'rgba(255, 150, 0, 0.4)', border: 'rgba(255, 255, 255, 0.2)' },
+                    { line: 'rgba(255, 0, 255, 0.3)', point: 'rgba(0, 255, 150, 0.4)', border: 'rgba(255, 255, 255, 0.2)' },
+                    { line: 'rgba(255, 200, 0, 0.3)', point: 'rgba(0, 150, 255, 0.4)', border: 'rgba(255, 255, 255, 0.2)' }
+                ];
+                const colors = handColors[handIndex % handColors.length];
+
+                // 绘制手部连接线
+                const connections = [
+                    [0, 1], [1, 2], [2, 3], [3, 4],  // 拇指
+                    [0, 5], [5, 6], [6, 7], [7, 8],  // 食指
+                    [5, 9], [9, 10], [10, 11], [11, 12],  // 中指
+                    [9, 13], [13, 14], [14, 15], [15, 16],  // 无名指
+                    [13, 17], [17, 18], [18, 19], [19, 20],  // 小指
+                    [0, 17]  // 手掌
+                ];
+
+                // 绘制美化的连接线
+                gameCtx.strokeStyle = colors.line;
+                gameCtx.lineWidth = 3;
+                gameCtx.setLineDash([5, 5]); // 虚线效果
+
+                connections.forEach(([start, end]) => {
+                    const startPoint = landmarks[start];
+                    const endPoint = landmarks[end];
+
+                    const startX = (1 - startPoint.x) * gameCanvas.width;
+                    const startY = startPoint.y * gameCanvas.height;
+                    const endX = (1 - endPoint.x) * gameCanvas.width;
+                    const endY = endPoint.y * gameCanvas.height;
+
+                    // 绘制渐变线条
+                    const gradient = gameCtx.createLinearGradient(startX, startY, endX, endY);
+                    gradient.addColorStop(0, colors.line);
+                    gradient.addColorStop(0.5, colors.line.replace('0.3', '0.6'));
+                    gradient.addColorStop(1, colors.line);
+
+                    gameCtx.strokeStyle = gradient;
+                    gameCtx.beginPath();
+                    gameCtx.moveTo(startX, startY);
+                    gameCtx.lineTo(endX, endY);
+                    gameCtx.stroke();
+                });
+
+                gameCtx.setLineDash([]); // 重置线条样式
+
+                // 绘制21个关键点 - 更小更精致
+                landmarks.forEach((landmark, index) => {
+                    const x = (1 - landmark.x) * gameCanvas.width; // 镜像坐标
+                    const y = landmark.y * gameCanvas.height;
+
+                    // 外圈发光效果
+                    gameCtx.fillStyle = colors.point.replace('0.4', '0.1');
+                    gameCtx.beginPath();
+                    gameCtx.arc(x, y, 12, 0, Math.PI * 2);
+                    gameCtx.fill();
+
+                    // 中圈
+                    gameCtx.fillStyle = colors.point.replace('0.4', '0.6');
+                    gameCtx.beginPath();
+                    gameCtx.arc(x, y, 6, 0, Math.PI * 2);
+                    gameCtx.fill();
+
+                    // 内圈高光
+                    gameCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    gameCtx.beginPath();
+                    gameCtx.arc(x, y, 2, 0, Math.PI * 2);
+                    gameCtx.fill();
+
+                    // 精致边框
+                    gameCtx.strokeStyle = colors.border;
+                    gameCtx.lineWidth = 1;
+                    gameCtx.beginPath();
+                    gameCtx.arc(x, y, 6, 0, Math.PI * 2);
+                    gameCtx.stroke();
+
+                    // 只为指尖显示编号（更清晰）
+                    const fingerTips = [4, 8, 12, 16, 20]; // 拇指、食指、中指、无名指、小指指尖
+                    if (fingerTips.includes(index)) {
+                        gameCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                        gameCtx.font = 'bold 12px Arial';
+                        gameCtx.textAlign = 'center';
+                        gameCtx.textBaseline = 'middle';
+                        gameCtx.fillText(index.toString(), x, y - 18);
+                    }
+                });
+
+                // 显示手掌编号（多人时）
+                if (handIndex > 0) {
+                    const palmX = (1 - landmarks[0].x) * gameCanvas.width;
+                    const palmY = landmarks[0].y * gameCanvas.height;
+
+                    gameCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                    gameCtx.font = 'bold 20px Arial';
+                    gameCtx.textAlign = 'center';
+                    gameCtx.textBaseline = 'middle';
+                    gameCtx.fillText(`P${handIndex + 1}`, palmX, palmY - 30);
+                }
+            }
+
+            createParticles(x, y, color) {
+                for (let i = 0; i < 25; i++) {
+                    this.particles.push(new Particle(x, y, color));
+                }
+            }
+
+            updateScore() {
+                scoreElement.textContent = `得分: ${this.score}`;
+            }
+
+            playSliceSound() {
+                try {
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+
+                    oscillator.frequency.value = 900 + Math.random() * 500;
+                    oscillator.type = 'sine';
+
+                    gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.3);
+                } catch (error) {
+                    // 忽略音频错误
+                }
+            }
+        }
+
+        // 初始化MediaPipe Hands
+        function initializeHands() {
+            hands = new Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
+                }
+            });
+
+            hands.setOptions({
+                maxNumHands: 8,  // 支持8只手（最多4人）
+                modelComplexity: 1,
+                minDetectionConfidence: 0.4, // 降低阈值以检测更多手
+                minTrackingConfidence: 0.4
+            });
+
+            hands.onResults((results) => {
+                if (game && game.gameRunning) {
+                    game.checkHandCollisions(results);
+                }
+            });
+        }
+
+        // 初始化摄像头
+        function initializeCamera() {
+            camera = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({image: video});
+                },
+                width: 1280,
+                height: 720
+            });
+        }
+
+        // 游戏主循环
+        function gameLoop() {
+            if (game && game.gameRunning) {
+                game.update();
+                game.draw();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        // 开始游戏
+        async function startGame() {
+            startBtn.style.display = 'none';
+            scoreElement.style.display = 'block';
+            statusElement.style.display = 'block';
+            debugInfo.style.display = 'block';
+
+            statusElement.textContent = '🤖 正在初始化手势识别...';
+            updateDebugInfo('初始化中', '等待', '0/42');
+
+            try {
+                // 初始化MediaPipe
+                initializeHands();
+                initializeCamera();
+
+                // 等待一下确保初始化完成
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // 启动摄像头
+                await camera.start();
+
+                statusElement.textContent = '🎮 42点手势识别已启动！挥手切水果！';
+                updateDebugInfo('已加载', '运行中', '0/42');
+
+                // 创建并开始游戏
+                game = new FruitNinjaGame();
+                game.start();
+
+                // 开始游戏循环
+                gameLoop();
+
+            } catch (error) {
+                console.error('游戏启动失败:', error);
+                statusElement.textContent = `❌ 启动失败: ${error.message}`;
+            }
+        }
+
+        // 初始化
+        startBtn.addEventListener('click', startGame);
+
+        // 页面加载完成后显示调试信息
+        window.addEventListener('load', () => {
+            debugInfo.style.display = 'block';
+        });
+
+        // 清理资源
+        window.addEventListener('beforeunload', () => {
+            if (camera) {
+                camera.stop();
+            }
+        });
+    </script>
+</body>
+</html>
